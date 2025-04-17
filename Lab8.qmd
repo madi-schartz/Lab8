@@ -10,3 +10,389 @@ execute:
   echo: true
 ---
 
+# Load in necessary packages
+```{r}
+
+library(tidyverse)
+library(tidymodels)
+library(powerjoin)
+library(glue)
+library(vip)
+library(baguette)
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(visdat)
+library (powerjoin)
+
+```
+
+# Read in CAMELS data 
+
+```{r}
+
+# Read in Data from CAMELS data set
+
+root  <- 'https://gdex.ucar.edu/dataset/camels/file'
+
+# Documentation PDF 
+download.file('https://gdex.ucar.edu/dataset/camels/file/camels_attributes_v2.0.pdf', 'data/camels_attributes_v2.0.pdf')
+
+# Vector storing data types/files
+types <- c("clim", "geol", "soil", "topo", "vege", "hydro")
+
+# Where the files live online ...
+remote_files  <- glue('{root}/camels_{types}.txt')
+
+# Where we want to download the data ...
+local_files   <- glue('data/camels_{types}.txt')
+
+# Download more data
+
+walk2(remote_files, local_files, download.file, quiet = TRUE)
+
+# Read and merge data
+
+camels <- map(local_files, read_delim, show_col_types = FALSE) 
+
+# Full join of data
+
+camels <- power_full_join(camels ,by = 'gauge_id')
+
+```
+
+# Clean Data 
+
+```{r}
+
+# Summary data 
+summary(camels)
+ls(camels)
+
+# Data cleaning
+camels <- na.omit(camels)
+
+```
+
+
+# Exploratory Visual Data Analysis 
+
+```{r}
+
+# Map of q mean of the sites
+
+ggplot(data = camels, aes(x = gauge_lon, y = gauge_lat)) +
+  borders("state", colour = "gray50") +
+  geom_point(aes(color = q_mean)) +
+  scale_color_gradient(low = "lightblue", high = "darkblue") +
+  ggthemes::theme_map()
+
+# Create a scatter plot of aridity vs rainfall
+
+ggplot(camels, aes(x = aridity, y = p_mean)) +
+  # Add points colored by mean flow
+  geom_point(aes(color = q_mean)) +
+  # Add a linear regression line
+  geom_smooth(method = "lm", color = "red", linetype = 2) +
+  # Apply the viridis color scale
+  scale_color_viridis_c() +
+  # Add a title, axis labels, and theme (w/ legend on the bottom)
+  theme_linedraw() + 
+  theme(legend.position = "bottom") + 
+  labs(title = "Aridity vs Rainfall vs Runnoff", 
+       x = "Aridity", 
+       y = "Rainfall",
+       color = "Mean Flow")
+
+# Test transformation 
+
+ggplot(camels, aes(x = aridity, y = p_mean)) +
+  geom_point(aes(color = q_mean)) +
+  geom_smooth(method = "lm") +
+  scale_color_viridis_c() +
+  # Apply log transformations to the x and y axes
+  scale_x_log10() + 
+  scale_y_log10() +
+  theme_linedraw() +
+  theme(legend.position = "bottom") + 
+  labs(title = "Aridity vs Rainfall vs Runnoff", 
+       x = "Aridity", 
+       y = "Rainfall",
+       color = "Mean Flow")
+
+# Visualize log transform may benefit q_mean data 
+
+ggplot(camels, aes(x = aridity, y = p_mean)) +
+  geom_point(aes(color = q_mean)) +
+  geom_smooth(method = "lm") +
+  # Apply a log transformation to the color scale
+  scale_color_viridis_c(trans = "log") +
+  scale_x_log10() + 
+  scale_y_log10() +
+  theme_linedraw() +
+  theme(legend.position = "bottom",
+        # Expand the legend width ...
+        legend.key.width = unit(2.5, "cm"),
+        legend.key.height = unit(.5, "cm")) + 
+  labs(title = "Aridity vs Rainfall vs Runnoff", 
+       x = "Aridity", 
+       y = "Rainfall",
+       color = "Mean Flow") 
+
+```
+
+# Data Spliting
+
+```{r}
+
+# Start by splitting the data 
+
+set.seed(123)
+
+# Bad form to perform simple transformations on the outcome variable within a recipe. So, we'll do it here.
+
+camels <- camels |> 
+  mutate(logQmean = log(q_mean))
+
+# Generate the split
+
+camels_split <- initial_split(camels, prop = 0.8)
+camels_train <- training(camels_split)
+camels_test  <- testing(camels_split)
+
+```
+
+# Feature Engineering 
+
+```{r}
+
+# Create a recipe to preprocess the data
+
+rec <-  recipe(logQmean ~ aridity + p_mean, data = camels_train) %>%
+  # Log transform the predictor variables (aridity and p_mean)
+  step_log(all_predictors()) %>%
+  # Add an interaction term between aridity and p_mean
+  step_interact(terms = ~ aridity:p_mean) |> 
+  # Drop any rows with missing values in the pred
+  step_naomit(all_predictors(), all_outcomes())
+
+```
+
+# Resampling and Model Testing
+
+```{r}
+
+# Build re-samples
+
+camels_cv <- vfold_cv(camels_train, v = 10)
+
+# Define Three Regression Models  
+
+rf_model <- rand_forest() |> 
+  set_engine("ranger") |> 
+  set_mode("regression")
+
+xgbm_model <- boost_tree() |> 
+  set_engine("xgboost") |> 
+  set_mode("regression")
+
+NeuralNet_Model <- bag_mlp () |>
+  set_engine("nnet") |>
+  set_mode("regression")
+
+# Workflow Set/Map/Auto-plot
+
+wf <- workflow_set(list(rec), list(rf_model, xgbm_model, NeuralNet_Model)) %>% 
+  workflow_map(resamples = camels_cv,
+               metrics   = metric_set(mae, rsq, rmse))
+
+autoplot(wf)
+
+rank_results(wf, rank_metric = "rsq", select_best = TRUE)
+
+# Model Selection with Justification 
+
+# Out of the three models, the one that I am going to select that performed the best is the Random Forest model that's set with the ranger engine and regression mode. In our workflow rank it shows that this model had the lowest scores in the mae and rmse but the highest rsq closest to 1 which shows that this model is the best to represent our camels data and predict logQmean accurately since it's overall a simplistic model with high predicitve acccuracy.
+
+```
+
+# Model Tuning 
+
+```{r}
+
+# Define a tunable model 
+
+rf_tune <- rand_forest(trees = tune(), min_n = tune()) |> 
+  set_engine("ranger") |> 
+  set_mode("regression")
+
+# Create a workflow
+
+wf_tune <- workflow(rec, 
+                    rand_forest(mode       = "regression", 
+                               engine     = "ranger", 
+                               trees      = tune(), 
+                               min_n      = tune()))
+
+wf_tune = workflow() |>
+  add_recipe(rec) |>
+  add_model(rf_tune)
+
+# Check the Tunable Values/Ranges
+
+dials <- extract_parameter_set_dials(wf_tune) 
+dials$object
+
+# Define Search Space (SFD with 25 predefined combos)
+
+my.grid <- dials |> 
+  update(trees = trees(c(1, 2000))) |>
+  grid_space_filling(size = 25)
+
+# Tune the Model 
+
+model_params <-  tune_grid(
+    wf_tune,
+    resamples = camels_cv,
+    grid = my.grid,
+    metrics = metric_set(rmse, rsq, mae),
+    control = control_grid(save_pred = TRUE)
+  )
+
+autoplot(model_params)
+
+# Describe what you see !
+
+# Minimal node size seem to have a similar relationship in relation to mae and rmse where as they increase the metrics decrease but with the metric rsq they all increase together. The trees seem to have no relationship with the metrics. 
+
+```
+
+# Check the skill of the tuned model 
+
+```{r}
+
+# Check using collect_metric () function
+
+tree_metrics = metric_set(rsq, rmse, mae)
+
+hp_best <- select_best(model_params, metric = "mae")
+
+finalize <- finalize_workflow(wf_tune, hp_best)
+
+final_fit <- last_fit(finalize, camels_split, metrics = tree_metrics)
+
+collect_metrics(final_fit)
+
+# Using this function, I can see from the tibble it produced that all metrics are standard with rsq being the highest at 0.78 and mae being the lowest at 0.33 which is goof for our model. 
+
+
+# Check using the show_best() function
+
+show_best(model_params, metric = "mae")
+
+# From this function we are able to see that the top five performing models have different amounts of trees and min_n that bring in a mean of 0.31. 
+
+# Use the select_best() function to save the best hp
+
+hp_best <- select_best(model_params, metric = "mae")
+
+```
+
+# Finalize your model 
+
+```{r}
+# Use the Finalize_Workflow () function 
+
+finalize <- finalize_workflow(wf_tune, hp_best)
+
+```
+
+# Final Model Verification
+
+```{r}
+
+# Use last_fit() to finalize workflow
+
+final_fit <- last_fit(finalize, camels_split, metrics = tree_metrics)
+
+# Interpret the Metrics
+
+collect_metrics(final_fit)
+ # How does the final model perform on the test data? Is it better or worse than the training data? Use your knowledge of the regression based metrics to describe the results.
+# The final model performs similarly to how our random forest model performed with the metrics in standard form of rsq, rmse, and mae, which means it performed well with the test data. The rsq values being similar on both data sets shows a high correlation for both applications of the model. The mae and rmse were almost exactly the same on both data sets which shows it performed well since the error scores were relatively low. 
+
+
+# Plot Predictions
+
+collect_predictions(final_fit) |> 
+  ggplot(aes(x = .pred, y = logQmean)) + 
+  geom_point(color = "blue") +
+  geom_abline(color = "red") + 
+  geom_smooth(method = "lm", color = "darkblue") + 
+  theme_linedraw() + 
+  labs(title = "Final Fit", 
+       x = "Predicted (LogQ10)", 
+       y = "Actual (LogQ10)")
+
+```
+
+# Building a Map! 
+
+```{r}
+
+# Use the augment() function for predictions
+
+pred = fit(finalize, data = camels) |>
+  augment(new_data = camels) 
+
+# Use the mutate() function to get the residuals 
+
+resid <- pred |>
+  mutate(residuals=(.pred-logQmean)^2)
+
+# Map of Predictions 
+
+ggplot(pred, aes(x = logQmean, y = .pred)) + 
+  geom_point(color = "#2c7fb8", alpha = 0.7) + 
+  geom_abline(color = "brown", linetype = "dashed") +
+  geom_smooth(method = "lm", color = "#253494", fill = "#253494", alpha = 0.2) + 
+  labs(title = "Random Forest Model", 
+       x = "Actual (LogQ10)", 
+       y = "Predicted (LogQ10)", subtitle = ) + 
+  theme_minimal()
+
+# Map of Residuals 
+
+ggplot(resid, aes(x = logQmean, y = residuals)) + 
+  geom_point(color = "#1b9e77", alpha = 0.7) + 
+  geom_abline(color = "purple", linetype = "dashed") +
+  geom_smooth(method = "lm", color = "#d95f02", fill = "orange", alpha = 0.2) + 
+  labs(title = "Random Forest Model - Residuals", 
+       x = "Actual (LogQ10)", 
+       y = "Predicted (LogQ10)", subtitle = ) + 
+  theme_minimal()
+
+# Combine both maps into ONE figure
+
+plot1 <- ggplot(pred, aes(x = logQmean, y = .pred)) + 
+  geom_point(color = "#2c7fb8", alpha = 0.7) + 
+  geom_abline(color = "purple", linetype = "dashed") +
+  geom_smooth(method = "lm", color = "#d95f02", fill = "orange", alpha = 0.2) + 
+  labs(title = "Random Forest Model - Predicted Q", 
+       x = "Actual (LogQ10)", 
+       y = "Predicted (LogQ10)", subtitle = ) + 
+  theme_minimal()
+
+plot2 <- ggplot(resid, aes(x = logQmean, y = residuals)) +
+  geom_point(color = "#1b9e77", alpha = 0.7) + 
+  geom_abline(color = "purple", linetype = "dashed") +
+  geom_smooth(method = "lm", color = "#d95f02", fill = "orange", alpha = 0.2) + 
+  labs(title = "Random Forest Model - Residuals", 
+       x = "Actual (LogQ10)", 
+       y = "Predicted (LogQ10)", subtitle = ) + 
+  theme_minimal()
+
+ggarrange(plot1, plot2, ncol = 2)
+
+```
+
