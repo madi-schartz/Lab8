@@ -3,5 +3,5 @@ project:
   output-dir: docs
   type: website
 format:
-   html:
+  html:
     self-contained: true
