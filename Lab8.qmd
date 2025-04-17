@@ -1,0 +1,12 @@
+---
+title: "Lab 8: Machine Learning The Whole Game Plan"
+subtitle: "Ecosystem Science"
+author:
+  - name: Madi Schartz
+    email: "mmschartz04@gmail.com"
+date: "2025-04-04"
+format: html
+execute: 
+  echo: true
+---
+
